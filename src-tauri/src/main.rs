@@ -1,15 +1,14 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-#![warn(dead_code)]
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;
-use time::macros::format_description;
-use tokio::io::{self, split, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{error, info};
 // 定义代理状态和控制逻辑的结构体
+
 struct ProxyControl {
     state: bool,
     connections: Vec<Arc<Mutex<TcpStream>>>,
@@ -52,158 +51,35 @@ impl ProxyControl {
 static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
     Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
-// 异步转发数据
-async fn forward_data(src: TcpStream, dst: TcpStream) -> io::Result<()> {
-    // 分割 src 和 dst 为读写两部分
-    let (mut src_reader, mut src_writer) = split(src);
-    let (mut dst_reader, mut dst_writer) = split(dst);
+async fn forward_data(mut src: TcpStream, mut dst: TcpStream) -> io::Result<()> {
+    // 使用 copy_bidirectional 进行双向数据转发
+    let copy_result = tokio::io::copy_bidirectional(&mut src, &mut dst).await;
 
-    info!("开始转发数据");
-
-    // 创建从 src 到 dst 的转发任务
-    let src_to_dst = async {
-        match io::copy(&mut src_reader, &mut dst_writer).await {
-            Ok(bytes) => {
-                info!("成功从源到目标转发 {} 字节", bytes);
-                Ok(())
-            }
-            Err(e) => {
-                error!("从源到目标转发时发生错误: {}", e);
-                Err(e)
-            }
+    // 检查 copy_bidirectional 的结果
+    match copy_result {
+        Ok((from_src_to_dst, from_dst_to_src)) => {
+            info!(
+                "从源到目标转发 {} 字节, 从目标到源转发 {} 字节",
+                from_src_to_dst, from_dst_to_src
+            );
+            let _ = src.shutdown().await;
+            let _ = dst.shutdown().await;
+            info!("关闭连接");
         }
-    };
-
-    // 创建从 dst 到 src 的转发任务
-    let dst_to_src = async {
-        match io::copy(&mut dst_reader, &mut src_writer).await {
-            Ok(bytes) => {
-                info!("成功从目标到源转发 {} 字节", bytes);
-                Ok(())
-            }
-            Err(e) => {
-                error!("从目标到源转发时发生错误: {}", e);
-                Err(e)
-            }
+        Err(e) => {
+            info!("数据转发时发生错误: {}", e);
+            let _ = src.shutdown().await;
+            let _ = dst.shutdown().await;
+            info!("关闭连接");
         }
-    };
-
-    let (res_src_to_dst, res_dst_to_src) = tokio::join!(src_to_dst, dst_to_src);
-
-    if let Err(e) = res_src_to_dst {
-        error!("处理从源到目标的转发时出错: {}", e);
-        return Err(e);
     }
 
-    if let Err(e) = res_dst_to_src {
-        error!("处理从目标到源的转发时出错: {}", e);
-        return Err(e);
-    }
-
-    info!("数据转发完成");
-    Ok(())
-}
-
-async fn forward_data_and_print_packets(src: TcpStream, dst: TcpStream) -> io::Result<()> {
-    // 分割 src 和 dst 为读写两部分
-    let (mut src_reader, mut src_writer) = split(src);
-    let (mut dst_reader, mut dst_writer) = split(dst);
-
-    info!("开始转发数据并打印数据包");
-
-    // 创建从 src 到 dst 的转发任务，同时打印数据包
-    let src_to_dst = async {
-        let mut buffer = vec![0u8; 4096]; // 调整缓冲区大小根据需要
-        loop {
-            match src_reader.read(&mut buffer).await {
-                Ok(0) => {
-                    info!("源端关闭连接");
-                    break;
-                }
-                Ok(n) => {
-                    // 将字节转换为字符串
-                    if let Ok(s) = std::str::from_utf8(&buffer[..n]) {
-                        println!("从源到目标的数据包: {}", s);
-                    } else {
-                        println!("数据包含非UTF-8字符");
-                    }
-                    if let Err(e) = dst_writer.write_all(&buffer[..n]).await {
-                        error!("写入目标时发生错误: {}", e);
-                        return Err(e);
-                    }
-                }
-                Err(e) => {
-                    error!("读取源时发生错误: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
-    };
-
-    // 创建从 dst 到 src 的转发任务，同时打印数据包
-    let dst_to_src = async {
-        let mut buffer = vec![0u8; 4096]; // 调整缓冲区大小根据需要
-        loop {
-            match dst_reader.read(&mut buffer).await {
-                Ok(0) => {
-                    info!("目标端关闭连接");
-                    break;
-                }
-                Ok(n) => {
-                    if let Err(e) = src_writer.write_all(&buffer[..n]).await {
-                        error!("写入源时发生错误: {}", e);
-                        return Err(e);
-                    }
-
-                    // 将字节转换为字符串
-                    // if let Ok(s) = std::str::from_utf8(&buffer[..n]) {
-                    //     println!("从目标到源的数据包: {}", s);
-                    // } else {
-                    //     println!("数据包含非UTF-8字符");
-                    //     // 如果数据包含非UTF-8字符，写入文件
-                    //     let file_name = "non_utf8_packets.txt";
-                    //     println!("file_name: {}", file_name);
-                    //     let mut file = tokio::fs::OpenOptions::new()
-                    //         .create(true)
-                    //         .append(true)
-                    //         .open(file_name)
-                    //         .await
-                    //         .unwrap();
-                    //     if let Err(e) = file.write_all(&buffer[..n]).await {
-                    //         error!("写入文件时发生错误: {}", e);
-                    //         return Err(e);
-                    //     }
-                    // }
-                }
-                Err(e) => {
-                    error!("读取目标时发生错误: {}", e);
-                    return Err(e);
-                }
-            }
-        }
-        Ok(())
-    };
-
-    let (res_src_to_dst, res_dst_to_src) = tokio::join!(src_to_dst, dst_to_src);
-
-    if let Err(e) = res_src_to_dst {
-        error!("处理从源到目标的转发并打印数据包时出错: {}", e);
-        return Err(e);
-    }
-
-    if let Err(e) = res_dst_to_src {
-        error!("处理从目标到源的转发并打印数据包时出错: {}", e);
-        return Err(e);
-    }
-
-    info!("数据转发并打印数据包完成");
     Ok(())
 }
 
 // 异步处理客户端连接
-async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
-    info!("新连接: {}", stream.peer_addr()?);
+async fn handle_client(mut stream: TcpStream, addr: std::net::SocketAddr) -> io::Result<()> {
+    info!("接受到来自 {} 的连接", addr);
     let mut buffer: [u8; 512] = [0u8; 512];
 
     // 1. 接收客户端的握手请求
@@ -227,8 +103,8 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     let buf_len = stream.read(&mut buffer).await?;
     let ver = buffer[0];
     let cmd = buffer[1];
-    // 只实现了 CONNECT、BIND
-    if buf_len < 7 || ver != 0x05 || (cmd != 0x01 && cmd != 0x02) {
+    // 只实现了 CONNECT
+    if buf_len < 7 || ver != 0x05 || cmd != 0x01 {
         error!("错误的连接请求 VER: {}, CMD: {}", ver, cmd);
         return Err(io::Error::new(io::ErrorKind::Other, "错误的连接请求"));
     }
@@ -287,20 +163,9 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 
     // 5. 收到客户端的连接请求后，需要返回一个响应
     stream
-        .write_all(&[ver, 0x00, 0x00, atyp, 0, 0, 0, 0, 0, 0])
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
     info!("响应连接成功消息给客户端");
-
-    // 将连接添加到全局活动连接列表
-    // let src_arc = Arc::new(stream);
-    // let dst_arc = Arc::new(target_stream);
-
-    // 添加到活动连接列表
-    {
-        // let mut control = PROXY_CONTROL.lock().await;
-        // control.connections.push(src_arc.clone());
-        // control.connections.push(dst_arc.clone());
-    }
 
     // 使用forward_data函数转发数据
     let _ = forward_data(stream, target_stream).await;
@@ -310,17 +175,8 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 
 #[tokio::main]
 async fn main() {
-    // 设置时区
-    let timer = tracing_subscriber::fmt::time::LocalTime::new(format_description!(
-        "[year]-[month]-[day] [hour]:[minute]:[second]"
-    ));
     // 初始化日志记录器
-    let subscriber = tracing_subscriber::fmt()
-        .compact()
-        // 设置时区
-        .with_timer(timer)
-        .with_thread_ids(true)
-        .finish();
+    let subscriber = tracing_subscriber::fmt().with_thread_ids(true).finish();
 
     // 设置全局日志记录器
     tracing::subscriber::set_global_default(subscriber).expect("无法设置全局日志记录器");
@@ -335,6 +191,7 @@ async fn main() {
 async fn start_proxy() -> Result<(), String> {
     let mut control = PROXY_CONTROL.lock().await;
     if control.state {
+        error!("代理已经在运行中");
         return Err("代理已经在运行中".to_string());
     }
 
@@ -345,24 +202,24 @@ async fn start_proxy() -> Result<(), String> {
     // 标记代理状态为运行中
     control.state = true;
 
-    tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:1080")
-            .await
-            .expect("无法绑定到代理端口");
+    let listener = TcpListener::bind("127.0.0.1:1080")
+        .await
+        .expect("无法绑定到代理端口");
 
-        // 使用tokio::select! 宏来同时等待新连接和停止信号
-        tokio::select! {
-            _ = accept_connections(listener) => {},
-            _ = stop_receiver => {
-                // 收到停止信号，退出监听循环
-                info!("收到停止信号，代理即将停止...");
-            },
-        }
+    // 使用tokio::select! 宏来同时等待新连接和停止信号
+    tokio::select! {
+        _ = accept_connections(listener) => {},
+        _ = stop_receiver => {
+            // 收到停止信号，退出监听循环
+            info!("收到停止信号，代理即将停止...");
+        },
+    }
 
-        // 重置代理控制状态，准备下一次启动
-        let mut control = PROXY_CONTROL.lock().await;
-        control.reset().await;
-    });
+    info!("代理已经停止。");
+
+    // 重置代理控制状态，准备下一次启动
+    let mut control = PROXY_CONTROL.lock().await;
+    control.reset().await;
 
     Ok(())
 }
@@ -370,13 +227,14 @@ async fn start_proxy() -> Result<(), String> {
 // 一个独立的异步函数，用于接收连接
 async fn accept_connections(listener: TcpListener) {
     info!("代理已经启动，等待连接...");
-    while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(handle_client(stream));
+    while let Ok((stream, addr)) = listener.accept().await {
+        tokio::spawn(handle_client(stream, addr));
     }
 }
 
 #[tauri::command]
 async fn stop_proxy() -> Result<String, String> {
+    info!("尝试停止代理...");
     let mut control = PROXY_CONTROL.lock().await;
     if let Some(sender) = control.stop_signal_sender.take() {
         // 尝试发送停止信号。如果接收端已经被丢弃，就返回错误。
