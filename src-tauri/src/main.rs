@@ -4,7 +4,7 @@
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use time::macros::format_description;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{self, split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{error, info};
@@ -52,27 +52,58 @@ static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
     Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
 // 异步转发数据
-async fn forward_data(src: Arc<Mutex<TcpStream>>, dst: Arc<Mutex<TcpStream>>) -> io::Result<()> {
-    let mut src_lock = src.lock().await;
-    let mut dst_lock = dst.lock().await;
+async fn forward_data(src: TcpStream, dst: TcpStream) -> io::Result<()> {
+    // 分割 src 和 dst 为读写两部分
+    let (mut src_reader, mut src_writer) = split(src);
+    let (mut dst_reader, mut dst_writer) = split(dst);
 
-    // 尝试转发数据，并处理可能出现的错误
-    match io::copy(&mut *src_lock, &mut *dst_lock).await {
-        Ok(bytes_copied) => {
-            info!(
-                "成功转发了 {} 字节, 从 {} 到 {}",
-                bytes_copied,
-                src_lock.peer_addr()?,
-                dst_lock.peer_addr()?
-            );
-            Ok(())
+    info!("开始转发数据");
+
+    // 创建从 src 到 dst 的转发任务
+    let src_to_dst = async {
+        match io::copy(&mut src_reader, &mut dst_writer).await {
+            Ok(bytes) => {
+                info!("成功从源到目标转发 {} 字节", bytes);
+                Ok(())
+            }
+            Err(e) => {
+                error!("从源到目标转发时发生错误: {}", e);
+                Err(e)
+            }
         }
-        Err(e) => {
-            error!("在转发数据时发生错误: {}", e);
-            // 这里可以添加更多的错误处理逻辑，比如关闭连接等
-            Err(e)
+    };
+
+    // 创建从 dst 到 src 的转发任务
+    let dst_to_src = async {
+        match io::copy(&mut dst_reader, &mut src_writer).await {
+            Ok(bytes) => {
+                info!("成功从目标到源转发 {} 字节", bytes);
+                Ok(())
+            }
+            Err(e) => {
+                error!("从目标到源转发时发生错误: {}", e);
+                Err(e)
+            }
         }
-    }
+    };
+
+    tokio::select! {
+        result = src_to_dst => {
+            if let Err(e) = result {
+                error!("处理从源到目标的转发时出错: {}", e);
+                return Err(e);
+            }
+        },
+        result = dst_to_src => {
+            if let Err(e) = result {
+                error!("处理从目标到源的转发时出错: {}", e);
+                return Err(e);
+            }
+        },
+    };
+
+    info!("数据转发完成");
+    Ok(())
 }
 
 // 异步处理客户端连接
@@ -100,7 +131,9 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     let ver = buffer[0];
     let cmd = buffer[1];
     let n = stream.read(&mut buffer).await?;
-    if n < 7 || ver != 0x05 || cmd != 0x01 {
+    // 只实现了 CONNECT、BIND
+    if n < 7 || ver != 0x05 || (cmd != 0x01 && cmd != 0x02) {
+        error!("错误的连接请求 VER: {}, CMD: {}", ver, cmd);
         return Err(io::Error::new(io::ErrorKind::Other, "错误的连接请求"));
     }
 
@@ -156,36 +189,18 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     info!("响应连接成功消息给客户端");
 
     // 将连接添加到全局活动连接列表
-    let src_arc = Arc::new(Mutex::new(stream));
-    let dst_arc = Arc::new(Mutex::new(target_stream));
+    // let src_arc = Arc::new(stream);
+    // let dst_arc = Arc::new(target_stream);
 
     // 添加到活动连接列表
     {
-        let mut control = PROXY_CONTROL.lock().await;
-        control.connections.push(src_arc.clone());
-        control.connections.push(dst_arc.clone());
+        // let mut control = PROXY_CONTROL.lock().await;
+        // control.connections.push(src_arc.clone());
+        // control.connections.push(dst_arc.clone());
     }
 
     // 使用forward_data函数转发数据
-    // 创建从客户端到服务器的数据转发任务
-    let client_to_server = forward_data(src_arc.clone(), dst_arc.clone());
-
-    // 创建从服务器到客户端的数据转发任务
-    let server_to_client = forward_data(dst_arc.clone(), src_arc.clone());
-
-    // 同时运行两个数据转发任务，并等待任意一个完成
-    tokio::select! {
-        result = client_to_server => {
-            if let Err(e) = result {
-                error!("客户端到服务器转发失败: {}", e);
-            }
-        },
-        result = server_to_client => {
-            if let Err(e) = result {
-                error!("服务器到客户端转发失败: {}", e);
-            }
-        },
-    };
+    let _ = forward_data(stream, target_stream).await;
 
     Ok(())
 }
