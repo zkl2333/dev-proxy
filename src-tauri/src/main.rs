@@ -3,49 +3,86 @@
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;
+use time::macros::format_description;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
+use tracing::{error, info};
+// 定义代理状态和控制逻辑的结构体
+struct ProxyControl {
+    state: bool,
+    connections: Vec<Arc<Mutex<TcpStream>>>,
+    stop_signal_sender: Option<oneshot::Sender<()>>,
+}
 
-// 定义全局变量来存储代理状态
-static PROXY_STATE: Lazy<Arc<Mutex<bool>>> = Lazy::new(|| Arc::new(Mutex::new(false)));
-// 定义用于存储活动连接的全局变量
-static ACTIVE_CONNECTIONS: Lazy<Mutex<Vec<Arc<Mutex<TcpStream>>>>> =
-    Lazy::new(|| Mutex::new(Vec::new()));
-// 定义一个全局变量来存储停止信号发送端
-static STOP_SIGNAL: Lazy<Arc<Mutex<Option<oneshot::Sender<()>>>>> =
-    Lazy::new(|| Arc::new(Mutex::new(None)));
+impl ProxyControl {
+    // 初始化新的代理控制实例
+    fn new() -> Self {
+        ProxyControl {
+            state: false,
+            connections: Vec::new(),
+            stop_signal_sender: None,
+        }
+    }
+
+    // 关闭所有活动连接并清空连接列表
+    async fn close_and_clear_connections(&mut self) {
+        // 遍历所有的连接
+        for conn in self.connections.drain(..) {
+            // 尝试获取 TcpStream 的锁
+            let mut conn = conn.lock().await;
+            // 尝试关闭 TcpStream
+            if let Err(e) = conn.shutdown().await {
+                error!("关闭连接失败: {}", e);
+            }
+        }
+    }
+
+    // 重置代理状态，准备下一次启动
+    async fn reset(&mut self) {
+        self.close_and_clear_connections().await;
+        self.state = false;
+        self.connections.clear();
+        self.stop_signal_sender = None;
+    }
+}
+
+// 使用Mutex包装代理控制实例，以便在异步环境中安全访问
+static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
+    Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
 // 异步转发数据
-async fn forward_data(src: Arc<Mutex<TcpStream>>, dst: Arc<Mutex<TcpStream>>) -> io::Result<u64> {
-    println!(
-        "开始转发数据 {} -> {}",
-        src.lock().await.peer_addr()?,
-        dst.lock().await.peer_addr()?
-    );
-    // 锁定源和目标TcpStream
+async fn forward_data(src: Arc<Mutex<TcpStream>>, dst: Arc<Mutex<TcpStream>>) -> io::Result<()> {
     let mut src_lock = src.lock().await;
     let mut dst_lock = dst.lock().await;
 
-    // 使用tokio::io::copy异步复制数据
-    // 注意: 这里的复制是单向的，从src到dst
-    let bytes_copied = io::copy(&mut *src_lock, &mut *dst_lock).await?;
-
-    // 可以选择在这里关闭TcpStream，如果你认为合适
-    // 例如：src_lock.shutdown().await?;
-    // dst_lock.shutdown().await?;
-
-    Ok(bytes_copied)
+    // 尝试转发数据，并处理可能出现的错误
+    match io::copy(&mut *src_lock, &mut *dst_lock).await {
+        Ok(bytes_copied) => {
+            info!(
+                "成功转发了 {} 字节, 从 {} 到 {}",
+                bytes_copied,
+                src_lock.peer_addr()?,
+                dst_lock.peer_addr()?
+            );
+            Ok(())
+        }
+        Err(e) => {
+            error!("在转发数据时发生错误: {}", e);
+            // 这里可以添加更多的错误处理逻辑，比如关闭连接等
+            Err(e)
+        }
+    }
 }
 
 // 异步处理客户端连接
 async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
-    println!("新连接: {}", stream.peer_addr()?);
+    info!("新连接: {}", stream.peer_addr()?);
     let mut buffer = [0u8; 512];
 
     // 1. 接收客户端的握手请求
     let n = stream.read(&mut buffer).await?;
-    println!(
+    info!(
         "握手请求 VER: {}, NMETHODS: {}, METHODS: {:?}",
         buffer[0],
         buffer[1],
@@ -57,7 +94,7 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 
     // 2. 响应握手请求（无需认证）
     stream.write_all(&[0x05, 0x00]).await?;
-    println!("响应握手请求（无需认证）");
+    info!("响应握手请求（无需认证）");
 
     // 3. 接收客户端的连接请求
     let ver = buffer[0];
@@ -100,23 +137,23 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
         }
     };
     let dst_port = ((buffer[n - 2] as u16) << 8) | (buffer[n - 1] as u16);
-    println!(
+    info!(
         "连接请求 CMD: {}, ATYP: {}, DST_ADDR: {}, DST_PORT: {}",
         cmd, atyp, dst_addr, dst_port
     );
 
     let target_addr = format!("{}:{}", dst_addr, dst_port);
-    println!("连接到: {}", target_addr);
+    info!("连接到: {}", target_addr);
 
     // 4. 尝试连接到目标服务器
     let target_stream = TcpStream::connect(target_addr).await?;
-    println!("连接成功: {}", target_stream.peer_addr()?);
+    info!("连接成功: {}", target_stream.peer_addr()?);
 
     // 5. 收到客户端的连接请求后，需要返回一个响应
     stream
         .write_all(&[ver, 0x00, 0x00, atyp, 0, 0, 0, 0, 0, 0])
         .await?;
-    println!("响应连接成功消息给客户端");
+    info!("响应连接成功消息给客户端");
 
     // 将连接添加到全局活动连接列表
     let src_arc = Arc::new(Mutex::new(stream));
@@ -124,9 +161,9 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 
     // 添加到活动连接列表
     {
-        let mut active_connections = ACTIVE_CONNECTIONS.lock().await;
-        active_connections.push(src_arc.clone());
-        active_connections.push(dst_arc.clone());
+        let mut control = PROXY_CONTROL.lock().await;
+        control.connections.push(src_arc.clone());
+        control.connections.push(dst_arc.clone());
     }
 
     // 使用forward_data函数转发数据
@@ -140,12 +177,12 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     tokio::select! {
         result = client_to_server => {
             if let Err(e) = result {
-                eprintln!("客户端到服务器转发失败: {}", e);
+                error!("客户端到服务器转发失败: {}", e);
             }
         },
         result = server_to_client => {
             if let Err(e) = result {
-                eprintln!("服务器到客户端转发失败: {}", e);
+                error!("服务器到客户端转发失败: {}", e);
             }
         },
     };
@@ -155,6 +192,21 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
 
 #[tokio::main]
 async fn main() {
+    // 设置时区
+    let timer = tracing_subscriber::fmt::time::LocalTime::new(format_description!(
+        "[year]-[month]-[day] [hour]:[minute]:[second]"
+    ));
+    // 初始化日志记录器
+    let subscriber = tracing_subscriber::fmt()
+        .compact()
+        // 设置时区
+        .with_timer(timer)
+        .with_thread_ids(true)
+        .finish();
+
+    // 设置全局日志记录器
+    tracing::subscriber::set_global_default(subscriber).expect("无法设置全局日志记录器");
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy])
         .run(tauri::generate_context!())
@@ -163,33 +215,35 @@ async fn main() {
 
 #[tauri::command]
 async fn start_proxy() -> Result<(), String> {
-    let state = PROXY_STATE.lock().await;
-    if *state {
+    let mut control = PROXY_CONTROL.lock().await;
+    if control.state {
         return Err("代理已经在运行中".to_string());
     }
-    drop(state); // 提前释放锁
 
-    // 创建一个one-shot通道，用于发送停止信号
+    // 创建一个新的one-shot通道，用于发送停止信号
     let (stop_sender, stop_receiver) = oneshot::channel::<()>();
+    control.stop_signal_sender = Some(stop_sender);
 
-    // 存储停止信号的发送端
-    *STOP_SIGNAL.lock().await = Some(stop_sender);
+    // 标记代理状态为运行中
+    control.state = true;
 
     tokio::spawn(async move {
         let listener = TcpListener::bind("127.0.0.1:1080")
             .await
             .expect("无法绑定到代理端口");
-        *PROXY_STATE.lock().await = true;
 
         // 使用tokio::select! 宏来同时等待新连接和停止信号
         tokio::select! {
             _ = accept_connections(listener) => {},
             _ = stop_receiver => {
                 // 收到停止信号，退出监听循环
+                info!("收到停止信号，代理即将停止...");
             },
         }
 
-        *PROXY_STATE.lock().await = false;
+        // 重置代理控制状态，准备下一次启动
+        let mut control = PROXY_CONTROL.lock().await;
+        control.reset().await;
     });
 
     Ok(())
@@ -197,58 +251,23 @@ async fn start_proxy() -> Result<(), String> {
 
 // 一个独立的异步函数，用于接收连接
 async fn accept_connections(listener: TcpListener) {
-    println!("代理已经启动，等待连接...");
+    info!("代理已经启动，等待连接...");
     while let Ok((stream, _)) = listener.accept().await {
         tokio::spawn(handle_client(stream));
     }
 }
 
 #[tauri::command]
-async fn stop_proxy() -> Result<(), String> {
-    println!("停止代理...");
-    let mut state = PROXY_STATE.lock().await;
-    if !*state {
-        return Err("代理已经关闭".to_string());
-    }
+async fn stop_proxy() -> Result<String, String> {
+    let mut control = PROXY_CONTROL.lock().await;
+    if let Some(sender) = control.stop_signal_sender.take() {
+        // 尝试发送停止信号。如果接收端已经被丢弃，就返回错误。
+        sender
+            .send(())
+            .map_err(|_| "无法发送停止信号，代理可能已经停止。".to_string())?;
 
-    *state = false;
-
-    // 发送停止信号
-    let maybe_sender = STOP_SIGNAL.lock().await.take(); // 移除并取得发送端
-    if let Some(sender) = maybe_sender {
-        // 发送停止信号
-        let _ = sender.send(());
+        Ok("代理已经停止。".to_string())
     } else {
-        eprintln!("代理未在运行或已停止");
+        Err("代理没有运行，无法停止。".to_string())
     }
-
-    // 获取并关闭所有活动连接
-    {
-        let active_connections = ACTIVE_CONNECTIONS.lock().await;
-        let connections: Vec<Arc<Mutex<TcpStream>>> = active_connections.iter().cloned().collect();
-        drop(active_connections);
-
-        println!("当前活动连接数: {}", connections.len());
-
-        // 并行关闭所有连接，使用tokio的方法
-        let futures: Vec<_> = connections
-            .iter()
-            .map(|stream_arc| async move {
-                let mut stream = stream_arc.lock().await;
-                let _ = stream.shutdown().await;
-                println!("关闭连接: {}", stream.peer_addr().unwrap());
-            })
-            .collect();
-
-        // 直接使用for循环等待每个future完成
-        for future in futures {
-            let _ = future.await; // 这里忽略了结果
-        }
-
-        // 清空活动连接列表
-        let mut active_connections = ACTIVE_CONNECTIONS.lock().await;
-        active_connections.clear();
-    }
-
-    Ok(())
 }
