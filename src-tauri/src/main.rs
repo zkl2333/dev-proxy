@@ -1,5 +1,6 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![warn(dead_code)]
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;
@@ -87,52 +88,147 @@ async fn forward_data(src: TcpStream, dst: TcpStream) -> io::Result<()> {
         }
     };
 
-    tokio::select! {
-        result = src_to_dst => {
-            if let Err(e) = result {
-                error!("处理从源到目标的转发时出错: {}", e);
-                return Err(e);
-            }
-        },
-        result = dst_to_src => {
-            if let Err(e) = result {
-                error!("处理从目标到源的转发时出错: {}", e);
-                return Err(e);
-            }
-        },
-    };
+    let (res_src_to_dst, res_dst_to_src) = tokio::join!(src_to_dst, dst_to_src);
+
+    if let Err(e) = res_src_to_dst {
+        error!("处理从源到目标的转发时出错: {}", e);
+        return Err(e);
+    }
+
+    if let Err(e) = res_dst_to_src {
+        error!("处理从目标到源的转发时出错: {}", e);
+        return Err(e);
+    }
 
     info!("数据转发完成");
+    Ok(())
+}
+
+async fn forward_data_and_print_packets(src: TcpStream, dst: TcpStream) -> io::Result<()> {
+    // 分割 src 和 dst 为读写两部分
+    let (mut src_reader, mut src_writer) = split(src);
+    let (mut dst_reader, mut dst_writer) = split(dst);
+
+    info!("开始转发数据并打印数据包");
+
+    // 创建从 src 到 dst 的转发任务，同时打印数据包
+    let src_to_dst = async {
+        let mut buffer = vec![0u8; 4096]; // 调整缓冲区大小根据需要
+        loop {
+            match src_reader.read(&mut buffer).await {
+                Ok(0) => {
+                    info!("源端关闭连接");
+                    break;
+                }
+                Ok(n) => {
+                    // 将字节转换为字符串
+                    if let Ok(s) = std::str::from_utf8(&buffer[..n]) {
+                        println!("从源到目标的数据包: {}", s);
+                    } else {
+                        println!("数据包含非UTF-8字符");
+                    }
+                    if let Err(e) = dst_writer.write_all(&buffer[..n]).await {
+                        error!("写入目标时发生错误: {}", e);
+                        return Err(e);
+                    }
+                }
+                Err(e) => {
+                    error!("读取源时发生错误: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    // 创建从 dst 到 src 的转发任务，同时打印数据包
+    let dst_to_src = async {
+        let mut buffer = vec![0u8; 4096]; // 调整缓冲区大小根据需要
+        loop {
+            match dst_reader.read(&mut buffer).await {
+                Ok(0) => {
+                    info!("目标端关闭连接");
+                    break;
+                }
+                Ok(n) => {
+                    if let Err(e) = src_writer.write_all(&buffer[..n]).await {
+                        error!("写入源时发生错误: {}", e);
+                        return Err(e);
+                    }
+
+                    // 将字节转换为字符串
+                    // if let Ok(s) = std::str::from_utf8(&buffer[..n]) {
+                    //     println!("从目标到源的数据包: {}", s);
+                    // } else {
+                    //     println!("数据包含非UTF-8字符");
+                    //     // 如果数据包含非UTF-8字符，写入文件
+                    //     let file_name = "non_utf8_packets.txt";
+                    //     println!("file_name: {}", file_name);
+                    //     let mut file = tokio::fs::OpenOptions::new()
+                    //         .create(true)
+                    //         .append(true)
+                    //         .open(file_name)
+                    //         .await
+                    //         .unwrap();
+                    //     if let Err(e) = file.write_all(&buffer[..n]).await {
+                    //         error!("写入文件时发生错误: {}", e);
+                    //         return Err(e);
+                    //     }
+                    // }
+                }
+                Err(e) => {
+                    error!("读取目标时发生错误: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let (res_src_to_dst, res_dst_to_src) = tokio::join!(src_to_dst, dst_to_src);
+
+    if let Err(e) = res_src_to_dst {
+        error!("处理从源到目标的转发并打印数据包时出错: {}", e);
+        return Err(e);
+    }
+
+    if let Err(e) = res_dst_to_src {
+        error!("处理从目标到源的转发并打印数据包时出错: {}", e);
+        return Err(e);
+    }
+
+    info!("数据转发并打印数据包完成");
     Ok(())
 }
 
 // 异步处理客户端连接
 async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     info!("新连接: {}", stream.peer_addr()?);
-    let mut buffer = [0u8; 512];
+    let mut buffer: [u8; 512] = [0u8; 512];
 
     // 1. 接收客户端的握手请求
-    let n = stream.read(&mut buffer).await?;
+    let buf_len = stream.read(&mut buffer).await?;
+    let ver: u8 = buffer[0];
+    let nmethods: u8 = buffer[1];
+    let methods: Vec<u8> = buffer[2..(2 + nmethods as usize)].to_vec();
     info!(
         "握手请求 VER: {}, NMETHODS: {}, METHODS: {:?}",
-        buffer[0],
-        buffer[1],
-        &buffer[2..n]
+        ver, nmethods, methods
     );
-    if n < 3 || buffer[0] != 0x05 {
+    if buf_len < 3 || ver != 0x05 {
         return Err(io::Error::new(io::ErrorKind::Other, "错误的握手请求"));
     }
 
     // 2. 响应握手请求（无需认证）
     stream.write_all(&[0x05, 0x00]).await?;
-    info!("响应握手请求（无需认证）");
+    info!("握手成功（无需认证）");
 
     // 3. 接收客户端的连接请求
+    let buf_len = stream.read(&mut buffer).await?;
     let ver = buffer[0];
     let cmd = buffer[1];
-    let n = stream.read(&mut buffer).await?;
     // 只实现了 CONNECT、BIND
-    if n < 7 || ver != 0x05 || (cmd != 0x01 && cmd != 0x02) {
+    if buf_len < 7 || ver != 0x05 || (cmd != 0x01 && cmd != 0x02) {
         error!("错误的连接请求 VER: {}, CMD: {}", ver, cmd);
         return Err(io::Error::new(io::ErrorKind::Other, "错误的连接请求"));
     }
@@ -141,9 +237,17 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
     let dst_addr: String = match atyp {
         // IPV4
         0x01 => {
-            // format!("{}.{}.{}.{}", buffer[4], buffer[5], buffer[6], buffer[7]);
-            let addr = format!("{}.{}.{}.{}", buffer[4], buffer[5], buffer[6], buffer[7]);
-            addr
+            let slice = &buffer[4..8]; // 获取切片
+            let bytes: Result<[u8; 4], _> = slice.try_into();
+            match bytes {
+                Ok(bytes) => {
+                    let addr = std::net::Ipv4Addr::from(bytes);
+                    addr.to_string()
+                }
+                Err(_) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, "错误的IPV4地址"));
+                }
+            }
         }
         // 域名
         0x03 => {
@@ -152,24 +256,23 @@ async fn handle_client(mut stream: TcpStream) -> io::Result<()> {
         }
         // IPV6
         0x04 => {
-            let addr = format!(
-                "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-                buffer[4],
-                buffer[5],
-                buffer[6],
-                buffer[7],
-                buffer[8],
-                buffer[9],
-                buffer[10],
-                buffer[11]
-            );
-            addr
+            let slice = &buffer[3..19]; // 获取切片
+            let bytes: Result<[u8; 16], _> = slice.try_into();
+            match bytes {
+                Ok(bytes) => {
+                    let addr = std::net::Ipv6Addr::from(bytes);
+                    addr.to_string()
+                }
+                Err(_) => {
+                    return Err(io::Error::new(io::ErrorKind::Other, "错误的IPV6地址"));
+                }
+            }
         }
         _ => {
             return Err(io::Error::new(io::ErrorKind::Other, "不支持的地址类型"));
         }
     };
-    let dst_port = ((buffer[n - 2] as u16) << 8) | (buffer[n - 1] as u16);
+    let dst_port = ((buffer[buf_len - 2] as u16) << 8) | (buffer[buf_len - 1] as u16);
     info!(
         "连接请求 CMD: {}, ATYP: {}, DST_ADDR: {}, DST_PORT: {}",
         cmd, atyp, dst_addr, dst_port
