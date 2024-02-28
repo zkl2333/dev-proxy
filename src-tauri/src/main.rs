@@ -7,48 +7,51 @@ mod socks5;
 use once_cell::sync::Lazy;
 use proxy_control::ProxyControl;
 use std::sync::Arc;
-use tokio::io;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
 use tracing::{error, info};
 
 // 使用Mutex包装代理控制实例，以便在异步环境中安全访问
 static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
     Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
-// 异步处理客户端连接
 async fn handle_client(
-    id: usize,
+    _: usize,
+    cancel_signal: Arc<Notify>,
     stream: Arc<Mutex<TcpStream>>,
-    addr: std::net::SocketAddr,
-) -> io::Result<()> {
-    info!("接受到来自 {} 的连接", addr);
-    match socks5::Socks5Connection::new(stream).await {
+    _: std::net::SocketAddr,
+) {
+    let connection_result = socks5::Socks5Connection::new(stream.clone(), cancel_signal).await;
+
+    match connection_result {
         Ok(mut connection) => {
             if let Err(e) = connection.serve().await {
                 error!("处理连接时发生错误: {}", e);
+            } else {
+                info!("连接处理完成");
             }
         }
         Err(e) => error!("创建SOCKS5连接失败: {}", e),
     }
-
-    let proxy_control = PROXY_CONTROL.clone();
-    let mut control = proxy_control.lock().await;
-    control.remove_connection(id).await;
-
-    info!("连接处理完成: {}", addr);
-    Ok(())
 }
 
-// 一个独立的异步函数，用于接收连接
+//
 async fn accept_connections(listener: TcpListener) {
     info!("代理已经启动，等待连接...");
     while let Ok((stream, addr)) = listener.accept().await {
         let stream = Arc::new(Mutex::new(stream));
         let proxy_control = PROXY_CONTROL.clone();
         let mut control = proxy_control.lock().await;
-        let id = control.add_connection(addr, stream.clone());
-        tokio::spawn(handle_client(id, stream, addr));
+        let (id, cancel_signal) = control.add_connection(addr, stream.clone());
+
+        tokio::spawn(async move {
+            handle_client(id, cancel_signal, stream, addr).await;
+
+            // 处理完成后，移除连接
+            let proxy_control = PROXY_CONTROL.clone();
+            let mut control = proxy_control.lock().await;
+            control.remove_connection(id).await;
+        });
     }
 }
 

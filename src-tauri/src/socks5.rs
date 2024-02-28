@@ -1,16 +1,23 @@
 use std::sync::Arc;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tracing::info;
 
 pub struct Socks5Connection {
     stream: Arc<Mutex<TcpStream>>,
+    cancel_signal: Arc<Notify>,
 }
 
 impl Socks5Connection {
-    pub async fn new(stream: Arc<Mutex<TcpStream>>) -> io::Result<Self> {
-        Ok(Socks5Connection { stream })
+    pub async fn new(
+        stream: Arc<Mutex<TcpStream>>,
+        cancel_signal: Arc<Notify>,
+    ) -> io::Result<Self> {
+        Ok(Socks5Connection {
+            stream,
+            cancel_signal: cancel_signal.clone(),
+        })
     }
 
     async fn handshake(&mut self) -> io::Result<()> {
@@ -100,17 +107,24 @@ impl Socks5Connection {
 
     async fn forward_data(&mut self, mut target_stream: TcpStream) -> io::Result<()> {
         let mut client_stream = self.stream.lock().await;
-        let copy_result =
-            tokio::io::copy_bidirectional(&mut *client_stream, &mut target_stream).await;
+        let copy_task = tokio::io::copy_bidirectional(&mut *client_stream, &mut target_stream);
 
-        match copy_result {
-            Ok((n1, n2)) => {
-                info!("数据传输完成, 客户端->目标: {}, 目标->客户端: {}", n1, n2);
-                Ok(())
+        tokio::select! {
+            result = copy_task => {
+                match result {
+                    Ok((n1, n2)) => {
+                        info!("数据传输完成, 客户端->目标: {}, 目标->客户端: {}", n1, n2);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        info!("数据传输失败: {}", e);
+                        Err(e)
+                    }
+                }
             }
-            Err(e) => {
-                info!("数据传输失败: {}", e);
-                Err(e)
+            _ = self.cancel_signal.notified() => {
+                info!("收到取消信号，停止数据传输");
+                Ok(())
             }
         }
     }

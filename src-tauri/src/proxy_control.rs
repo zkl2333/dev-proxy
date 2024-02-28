@@ -3,13 +3,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, Mutex, Notify};
 use tracing::{error, info};
 
 struct Connection {
     id: usize,
     addr: SocketAddr,
     stream: Arc<Mutex<TcpStream>>,
+    cancel_signal: Arc<Notify>,
 }
 
 pub struct ProxyControl {
@@ -32,19 +33,40 @@ impl ProxyControl {
 
     // 重置代理状态，准备下一次启动
     pub async fn reset(&mut self) {
-        self.remove_all_connections().await;
+        self.cancel_all_connections().await;
         self.state = false;
-        self.connections.clear();
         self.stop_signal_sender = None;
     }
 
-    pub fn add_connection(&mut self, addr: SocketAddr, stream: Arc<Mutex<TcpStream>>) -> usize {
+    pub fn add_connection(
+        &mut self,
+        addr: SocketAddr,
+        stream: Arc<Mutex<TcpStream>>,
+    ) -> (usize, Arc<Notify>) {
         let id = self.next_id;
         self.next_id += 1;
-        let connection = Connection { id, stream, addr };
+        let cancel_signal = Arc::new(Notify::new());
+        let connection = Connection {
+            id,
+            stream,
+            addr,
+            cancel_signal: cancel_signal.clone(),
+        };
         self.connections.insert(id, connection);
-        info!("连接 {} 已经添加，ID: {}", addr, id);
-        id
+        info!("ID: {} 连接 {} 已经添加", id, addr);
+        (id, cancel_signal)
+    }
+
+    // 提供方法来触发特定连接的取消信号
+    pub async fn cancel_connection(&self, id: usize) {
+        info!("ID: {} 取消连接", id);
+        if let Some(connection) = self.connections.get(&id) {
+            info!("ID: {} 发送取消信号", id);
+            connection.cancel_signal.notify_one();
+            info!("ID: {} 取消信号已发送", id);
+        } else {
+            info!("ID: {} 连接不存在", id);
+        }
     }
 
     pub async fn remove_connection(&mut self, id: usize) {
@@ -57,15 +79,17 @@ impl ProxyControl {
                     Err(e)
                 }
             };
-            info!("连接 {} 已经移除，ID: {}", connection.addr, connection.id);
+            info!("ID: {} 连接 {} 移除成功", connection.id, connection.addr);
         } else {
-            info!("连接 ID: {} 不存在", id);
+            info!("ID: {} 连接不存在", id);
         }
     }
 
-    pub async fn remove_all_connections(&mut self) {
-        for id in self.connections.keys().cloned().collect::<Vec<_>>() {
-            self.remove_connection(id).await;
+    pub async fn cancel_all_connections(&mut self) {
+        let ids = self.connections.keys().cloned().collect::<Vec<_>>();
+        info!("移除所有连接: {:?}", ids);
+        for id in ids {
+            self.cancel_connection(id).await;
         }
     }
 }
