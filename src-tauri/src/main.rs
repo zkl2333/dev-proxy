@@ -173,6 +173,14 @@ async fn handle_client(mut stream: TcpStream, addr: std::net::SocketAddr) -> io:
     Ok(())
 }
 
+// 一个独立的异步函数，用于接收连接
+async fn accept_connections(listener: TcpListener) {
+    info!("代理已经启动，等待连接...");
+    while let Ok((stream, addr)) = listener.accept().await {
+        tokio::spawn(handle_client(stream, addr));
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // 初始化日志记录器
@@ -189,60 +197,48 @@ async fn main() {
 
 #[tauri::command]
 async fn start_proxy() -> Result<(), String> {
-    let mut control = PROXY_CONTROL.lock().await;
-    if control.state {
-        error!("代理已经在运行中");
+    let control = PROXY_CONTROL.clone();
+    let mut guard = control.lock().await;
+
+    if guard.state {
         return Err("代理已经在运行中".to_string());
     }
 
-    // 创建一个新的one-shot通道，用于发送停止信号
+    guard.state = true;
     let (stop_sender, stop_receiver) = oneshot::channel::<()>();
-    control.stop_signal_sender = Some(stop_sender);
+    guard.stop_signal_sender = Some(stop_sender);
 
-    // 标记代理状态为运行中
-    control.state = true;
+    // 释放锁，以便在异步操作中允许其他任务获取锁
+    drop(guard);
 
     let listener = TcpListener::bind("127.0.0.1:1080")
         .await
-        .expect("无法绑定到代理端口");
+        .map_err(|_| "无法绑定到代理端口".to_string())?;
 
-    // 使用tokio::select! 宏来同时等待新连接和停止信号
     tokio::select! {
         _ = accept_connections(listener) => {},
         _ = stop_receiver => {
-            // 收到停止信号，退出监听循环
-            info!("收到停止信号，代理即将停止...");
+            println!("收到停止信号，代理即将停止...");
         },
-    }
+    };
 
-    info!("代理已经停止。");
-
-    // 重置代理控制状态，准备下一次启动
-    let mut control = PROXY_CONTROL.lock().await;
-    control.reset().await;
-
+    let mut guard = control.lock().await;
+    guard.reset().await;
+    println!("代理已经停止。");
     Ok(())
-}
-
-// 一个独立的异步函数，用于接收连接
-async fn accept_connections(listener: TcpListener) {
-    info!("代理已经启动，等待连接...");
-    while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_client(stream, addr));
-    }
 }
 
 #[tauri::command]
 async fn stop_proxy() -> Result<String, String> {
-    info!("尝试停止代理...");
-    let mut control = PROXY_CONTROL.lock().await;
-    if let Some(sender) = control.stop_signal_sender.take() {
-        // 尝试发送停止信号。如果接收端已经被丢弃，就返回错误。
+    let control = PROXY_CONTROL.clone();
+    let mut guard = control.lock().await;
+
+    if let Some(sender) = guard.stop_signal_sender.take() {
+        drop(guard); // 在发送信号前释放锁，避免死锁
         sender
             .send(())
             .map_err(|_| "无法发送停止信号，代理可能已经停止。".to_string())?;
-
-        Ok("代理已经停止。".to_string())
+        Ok("代理停止信号发送成功。".to_string())
     } else {
         Err("代理没有运行，无法停止。".to_string())
     }
