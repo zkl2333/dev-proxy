@@ -24,7 +24,7 @@ function App() {
 
   return (
     <div className="container">
-      <h1>Welcome to Tauri!</h1>
+      <h1 className="text-3xl font-bold underline">Hello world!</h1>
       {response && <p>{response}</p>}
       <button onClick={start_proxy}>启动 Proxy</button>
       <button onClick={stop_proxy}>停止 Proxy</button>
