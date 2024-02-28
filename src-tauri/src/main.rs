@@ -18,6 +18,7 @@ static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
 
 // 异步处理客户端连接
 async fn handle_client(
+    id: usize,
     stream: Arc<Mutex<TcpStream>>,
     addr: std::net::SocketAddr,
 ) -> io::Result<()> {
@@ -30,6 +31,11 @@ async fn handle_client(
         }
         Err(e) => error!("创建SOCKS5连接失败: {}", e),
     }
+
+    let proxy_control = PROXY_CONTROL.clone();
+    let mut control = proxy_control.lock().await;
+    control.remove_connection(id).await;
+
     info!("连接处理完成: {}", addr);
     Ok(())
 }
@@ -41,9 +47,8 @@ async fn accept_connections(listener: TcpListener) {
         let stream = Arc::new(Mutex::new(stream));
         let proxy_control = PROXY_CONTROL.clone();
         let mut control = proxy_control.lock().await;
-        let id = control.add_connection(stream.clone());
-        info!("连接 {} 已经添加，ID: {}", addr, id);
-        tokio::spawn(handle_client(stream, addr));
+        let id = control.add_connection(addr, stream.clone());
+        tokio::spawn(handle_client(id, stream, addr));
     }
 }
 

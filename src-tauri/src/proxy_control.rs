@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex};
+use tracing::{error, info};
 
 struct Connection {
     id: usize,
+    addr: SocketAddr,
     stream: Arc<Mutex<TcpStream>>,
 }
 
@@ -35,18 +38,28 @@ impl ProxyControl {
         self.stop_signal_sender = None;
     }
 
-    pub fn add_connection(&mut self, stream: Arc<Mutex<TcpStream>>) -> usize {
+    pub fn add_connection(&mut self, addr: SocketAddr, stream: Arc<Mutex<TcpStream>>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        let connection = Connection { id, stream };
+        let connection = Connection { id, stream, addr };
         self.connections.insert(id, connection);
+        info!("连接 {} 已经添加，ID: {}", addr, id);
         id
     }
 
     pub async fn remove_connection(&mut self, id: usize) {
         if let Some(connection) = self.connections.remove(&id) {
             let mut stream = connection.stream.lock().await;
-            let _ = stream.shutdown().await;
+            let _ = match stream.shutdown().await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    error!("关闭连接时发生错误: {}", e);
+                    Err(e)
+                }
+            };
+            info!("连接 {} 已经移除，ID: {}", connection.addr, connection.id);
+        } else {
+            info!("连接 ID: {} 不存在", id);
         }
     }
 
