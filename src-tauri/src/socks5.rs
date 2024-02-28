@@ -37,8 +37,7 @@ impl Socks5Connection {
         Ok(())
     }
 
-    async fn parse_request(&mut self) -> io::Result<(String, u16)> {
-        // 读取 VER CMD RSV ATYP
+    async fn parse_request(&mut self) -> io::Result<std::net::SocketAddr> {
         let ver = self.stream.read_u8().await?;
         if ver != 0x05 {
             return Err(io::Error::new(
@@ -48,57 +47,49 @@ impl Socks5Connection {
         }
         let cmd = self.stream.read_u8().await?;
         if cmd != 0x01 {
-            // 只处理 CONNECT 请求
             return Err(io::Error::new(io::ErrorKind::Other, "只支持 CONNECT 请求"));
         }
-        let rsv = self.stream.read_u8().await?;
-        if rsv != 0x00 {
-            return Err(io::Error::new(io::ErrorKind::Other, "RSV字段不为0"));
-        }
+        let _rsv = self.stream.read_u8().await?;
         let atyp = self.stream.read_u8().await?;
-        let (dst_addr, dst_port) = match atyp {
+        match atyp {
             0x01 => {
                 // IPv4
-                let mut buf = [0u8; 6];
+                let mut buf = [0u8; 4];
                 self.stream.read_exact(&mut buf).await?;
-                let addr = format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]);
-                let port = ((buf[4] as u16) << 8) | (buf[5] as u16);
-                (addr, port)
+                let addr = std::net::Ipv4Addr::from(buf);
+                let port = self.stream.read_u16().await?;
+                Ok(std::net::SocketAddr::new(addr.into(), port))
             }
             0x03 => {
                 // 域名
-                let mut len = [0u8; 1];
-                self.stream.read_exact(&mut len).await?;
-                let len = len[0] as usize;
-                let mut buf = vec![0u8; len + 2];
+                let len = self.stream.read_u8().await? as usize;
+                let mut buf = vec![0u8; len];
                 self.stream.read_exact(&mut buf).await?;
-                let addr = String::from_utf8(buf[..len].to_vec())
+                let addr = String::from_utf8(buf)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "无效的域名格式"))?;
-                let port = ((buf[len] as u16) << 8) | (buf[len + 1] as u16);
-                (addr, port)
+                let port = self.stream.read_u16().await?;
+                let mut lookup_result = tokio::net::lookup_host((addr.as_str(), port)).await?;
+                let socket_addr = lookup_result
+                    .next()
+                    .ok_or(io::Error::new(io::ErrorKind::NotFound, "未找到地址"))?;
+                Ok(socket_addr)
             }
             0x04 => {
                 // IPv6
-                let mut buf = [0u8; 18];
+                let mut buf = [0u8; 16];
                 self.stream.read_exact(&mut buf).await?;
-                let addr =
-                    std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&buf[..16]).unwrap()).to_string();
-                let port = ((buf[16] as u16) << 8) | (buf[17] as u16);
-                (addr, port)
+                let addr = std::net::Ipv6Addr::from(buf);
+                let port = self.stream.read_u16().await?;
+                Ok(std::net::SocketAddr::new(addr.into(), port))
             }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "不支持的地址类型",
-                ))
-            }
-        };
-        info!("连接请求 DST_ADDR: {}, DST_PORT: {}", dst_addr, dst_port);
-        Ok((dst_addr, dst_port))
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "不支持的地址类型",
+            )),
+        }
     }
 
-    async fn connect_target(&self, addr: &str, port: u16) -> io::Result<TcpStream> {
-        let target_addr = format!("{}:{}", addr, port);
+    async fn connect_target(&self, target_addr: std::net::SocketAddr) -> io::Result<TcpStream> {
         TcpStream::connect(target_addr).await
     }
 
@@ -118,8 +109,8 @@ impl Socks5Connection {
 
     pub async fn serve(&mut self) -> io::Result<()> {
         self.handshake().await?;
-        let (addr, port) = self.parse_request().await?;
-        let target_stream = self.connect_target(&addr, port).await?;
+        let addr = self.parse_request().await?;
+        let target_stream = self.connect_target(addr).await?;
         // 发送连接成功响应
         self.stream
             .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
