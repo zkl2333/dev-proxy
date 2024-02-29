@@ -64,13 +64,17 @@ async fn main() {
     tracing::subscriber::set_global_default(subscriber).expect("无法设置全局日志记录器");
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![start_proxy, stop_proxy])
+        .invoke_handler(tauri::generate_handler![
+            start_proxy,
+            stop_proxy,
+            get_proxy_state
+        ])
         .run(tauri::generate_context!())
         .expect("运行Tauri应用时出错");
 }
 
 #[tauri::command]
-async fn start_proxy() -> Result<(), String> {
+async fn start_proxy() -> Result<String, String> {
     let control = PROXY_CONTROL.clone();
     let mut guard = control.lock().await;
 
@@ -92,14 +96,14 @@ async fn start_proxy() -> Result<(), String> {
     tokio::select! {
         _ = accept_connections(listener) => {},
         _ = stop_receiver => {
-            println!("收到停止信号，代理即将停止...");
+            info!("收到停止信号，代理即将停止...");
         },
     };
 
     let mut guard = control.lock().await;
     guard.reset().await;
-    println!("代理已经停止。");
-    Ok(())
+    info!("代理已经停止。");
+    Ok("代理已经停止。".to_string())
 }
 
 #[tauri::command]
@@ -114,6 +118,14 @@ async fn stop_proxy() -> Result<String, String> {
             .map_err(|_| "无法发送停止信号，代理可能已经停止。".to_string())?;
         Ok("代理停止信号发送成功。".to_string())
     } else {
+        error!("代理没有运行，无法停止。");
         Err("代理没有运行，无法停止。".to_string())
     }
+}
+
+#[tauri::command]
+async fn get_proxy_state() -> Result<bool, String> {
+    let control = PROXY_CONTROL.clone();
+    let guard = control.lock().await;
+    Ok(guard.state)
 }

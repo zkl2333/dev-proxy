@@ -9,7 +9,7 @@ function Index() {
       const res = await invoke<string>("start_proxy");
       setResponse(res);
     } catch (error) {
-      setResponse((error as Error).message);
+      setResponse(error as string);
     }
   }
 
@@ -18,20 +18,22 @@ function Index() {
       const res = await invoke<string>("stop_proxy");
       setResponse(res);
     } catch (error) {
-      setResponse((error as Error).message);
+      setResponse(error as string);
     }
   }
 
   return (
-    <>
-      <Button size="sm" onClick={start_proxy}>
-        启动 Proxy
-      </Button>
-      <Button size="sm" variant="destructive" onClick={stop_proxy}>
-        停止 Proxy
-      </Button>
-      {response && <p>{response}</p>}
-    </>
+    <div className="space-y-2">
+      <div className="flex gap-4">
+        <Button size="sm" onClick={start_proxy}>
+          启动 Proxy
+        </Button>
+        <Button size="sm" variant="destructive" onClick={stop_proxy}>
+          停止 Proxy
+        </Button>
+      </div>
+      <div>{response && <p>{response}</p>}</div>
+    </div>
   );
 }
 
