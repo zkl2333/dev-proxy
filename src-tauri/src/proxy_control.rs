@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -5,6 +6,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{oneshot, Mutex, Notify};
 use tracing::{error, info};
+
+// 使用Mutex包装代理控制实例，以便在异步环境中安全访问
+pub static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
+    Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
 struct Connection {
     id: usize,
