@@ -89,21 +89,32 @@ async fn start_proxy() -> Result<String, String> {
     // 释放锁，以便在异步操作中允许其他任务获取锁
     drop(guard);
 
-    let listener = TcpListener::bind("127.0.0.1:1080")
-        .await
-        .map_err(|_| "无法绑定到代理端口".to_string())?;
+    // 在一个新的异步任务中启动代理服务
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind("127.0.0.1:1080").await {
+            Ok(listener) => listener,
+            Err(_) => {
+                let mut guard = control.lock().await;
+                guard.reset().await;
+                error!("无法绑定到代理端口");
+                return;
+            }
+        };
 
-    tokio::select! {
-        _ = accept_connections(listener) => {},
-        _ = stop_receiver => {
-            info!("收到停止信号，代理即将停止...");
-        },
-    };
+        tokio::select! {
+            _ = accept_connections(listener) => {},
+            _ = stop_receiver => {
+                info!("收到停止信号，代理即将停止...");
+            },
+        };
 
-    let mut guard = control.lock().await;
-    guard.reset().await;
-    info!("代理已经停止。");
-    Ok("代理已经停止。".to_string())
+        let mut guard = control.lock().await;
+        guard.reset().await;
+        info!("代理已经停止。");
+    });
+
+    // 立即返回代理启动的结果
+    Ok("代理启动中...".to_string())
 }
 
 #[tauri::command]
