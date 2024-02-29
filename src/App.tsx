@@ -1,33 +1,36 @@
-import { invoke } from "@tauri-apps/api/tauri";
+import { Suspense } from "react";
+import { Sidebar } from "./components/sidebar/sidebar";
+import { useRoutes } from "react-router";
 import "./App.css";
-import { useState } from "react";
+
+import routes from "~react-pages";
+
+const menu = [
+  {
+    name: "通用",
+    path: "/",
+  },
+  {
+    name: "服务",
+    path: "/services",
+  },
+  {
+    name: "连接",
+    path: "/about",
+  },
+  {
+    name: "日志",
+    path: "/contact",
+  },
+];
 
 function App() {
-  const [response, setResponse] = useState("");
-  async function start_proxy() {
-    try {
-      const res = await invoke<string>("start_proxy");
-      setResponse(res);
-    } catch (error) {
-      setResponse((error as Error).message);
-    }
-  }
-
-  async function stop_proxy() {
-    try {
-      const res = await invoke<string>("stop_proxy");
-      setResponse(res);
-    } catch (error) {
-      setResponse((error as Error).message);
-    }
-  }
-
   return (
-    <div className="container">
-      <h1 className="text-3xl font-bold underline">Hello world!</h1>
-      {response && <p>{response}</p>}
-      <button onClick={start_proxy}>启动 Proxy</button>
-      <button onClick={stop_proxy}>停止 Proxy</button>
+    <div className="flex h-full">
+      <Sidebar menu={menu} className="w-52 bg-background" />
+      <div className="border-l flex gap-4 p-4">
+        <Suspense fallback={<p>Loading...</p>}>{useRoutes(routes)}</Suspense>
+      </div>
     </div>
   );
 }
