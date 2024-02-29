@@ -20,7 +20,7 @@ export function Sidebar({ menu, className, ...rest }: SidebarProps) {
                     size={"lg"}
                     variant={isPending || isTransitioning || isActive ? "secondary" : "ghost"}
                     disabled={isPending || isTransitioning}
-                    className="w-full justify-start"
+                    className="w-full justify-center"
                   >
                     {item.name}
                   </Button>

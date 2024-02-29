@@ -11,7 +11,8 @@ use tracing::{error, info};
 pub static PROXY_CONTROL: Lazy<Arc<Mutex<ProxyControl>>> =
     Lazy::new(|| Arc::new(Mutex::new(ProxyControl::new())));
 
-struct Connection {
+#[derive(Clone)]
+pub struct Connection {
     id: usize,
     addr: SocketAddr,
     stream: Arc<Mutex<TcpStream>>,

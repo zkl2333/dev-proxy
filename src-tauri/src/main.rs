@@ -4,7 +4,7 @@
 mod commands;
 mod proxy_control;
 mod socks5;
-use commands::{get_proxy_state::*, start_proxy::*, stop_proxy::*};
+use commands::{get_proxy_connections::*, get_proxy_state::*, start_proxy::*, stop_proxy::*};
 
 #[tokio::main]
 async fn main() {
@@ -18,7 +18,8 @@ async fn main() {
         .invoke_handler(tauri::generate_handler![
             start_proxy,
             stop_proxy,
-            get_proxy_state
+            get_proxy_state,
+            get_proxy_connections
         ])
         .run(tauri::generate_context!())
         .expect("运行Tauri应用时出错");
