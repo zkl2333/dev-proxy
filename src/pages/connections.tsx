@@ -12,7 +12,7 @@ const Connections = () => {
   }
 
   useEffect(() => {
-    // get_proxy_connections();
+    get_proxy_connections();
   }, []);
   return <div>connections</div>;
 };

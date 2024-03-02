@@ -1,8 +1,10 @@
-use crate::proxy_control::PROXY_CONTROL;
+use tauri::State;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use crate::proxy_server::ProxyServer;
 
 #[tauri::command]
-pub(crate) async fn get_proxy_state() -> Result<bool, String> {
-    let control = PROXY_CONTROL.clone();
-    let guard = control.lock().await;
-    Ok(guard.state)
+pub async fn get_proxy_state(proxy_server: State<'_, Arc<Mutex<ProxyServer>>>) -> Result<bool, String> {
+    let server = proxy_server.lock().await;
+    Ok(server.get_state())
 }

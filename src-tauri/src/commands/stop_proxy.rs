@@ -1,19 +1,13 @@
-use crate::proxy_control::PROXY_CONTROL;
-use tracing::error;
+use tauri::State;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use crate::proxy_server::ProxyServer;
 
 #[tauri::command]
-pub(crate) async fn stop_proxy() -> Result<String, String> {
-    let control = PROXY_CONTROL.clone();
-    let mut guard = control.lock().await;
-
-    if let Some(sender) = guard.stop_signal_sender.take() {
-        drop(guard); // 在发送信号前释放锁，避免死锁
-        sender
-            .send(())
-            .map_err(|_| "无法发送停止信号，代理可能已经停止。".to_string())?;
-        Ok("代理停止信号发送成功。".to_string())
-    } else {
-        error!("代理没有运行，无法停止。");
-        Err("代理没有运行，无法停止。".to_string())
+pub async fn stop_proxy(proxy_server: State<'_, Arc<Mutex<ProxyServer>>>) -> Result<String, String> {
+    let mut server = proxy_server.lock().await;
+    match server.stop() {
+        Ok(_) => Ok("代理服务器停止成功".to_string()),
+        Err(e) => Err(format!("停止代理服务器失败: {}", e)),
     }
 }
