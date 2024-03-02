@@ -37,7 +37,7 @@ function Index() {
   }, []);
 
   return (
-    <div className="space-y-2">
+    <div className="p-4 space-y-2">
       <div className="flex flex-col gap-4">
         <div className="flex items-center py-2 px-4 rounded-md justify-between hover:bg-accent hover:text-accent-foreground">
           代理服务

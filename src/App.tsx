@@ -25,7 +25,7 @@ function App() {
   return (
     <div className="flex h-full">
       <Sidebar menu={menu} className="w-52 bg-background" />
-      <div className="border-l p-4 w-full">
+      <div className="border-l w-full">
         <Suspense fallback={<p>Loading...</p>}>{useRoutes(routes)}</Suspense>
       </div>
       <Toaster position="top-right" />

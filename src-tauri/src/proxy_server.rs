@@ -4,6 +4,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{io, sync::Mutex};
 
+use crate::session_handler::SessionHandlerData;
 use crate::session_manager::SessionManagerCommand;
 use crate::{SessionHandler, SessionManager};
 
@@ -39,7 +40,7 @@ impl ProxyServer {
                         let session = SessionHandler::new(stream).await;
                         match session {
                             Ok(session) => {
-                                let   session_arc = Arc::new(Mutex::new(session));
+                                let session_arc = Arc::new(Mutex::new(session));
                                 // 使用克隆的sender发送添加会话的命令
                                 if let Err(e) = session_manager_sender.send(SessionManagerCommand::Add(session_arc.clone())).await {
                                     tracing::error!("发送会话管理命令时出错: {}", e);
@@ -95,5 +96,15 @@ impl ProxyServer {
             }
         }
         vec![] // 如果出现错误，则返回空列表
+    }
+
+    pub async fn get_sessions_serializable(&self) -> Vec<SessionHandlerData> {
+        let sessions = self.get_sessions().await;
+        let mut session_data_list = Vec::new();
+        for session in sessions {
+            let session = session.lock().await;
+            session_data_list.push(session.get_data());
+        }
+        session_data_list
     }
 }

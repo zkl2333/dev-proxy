@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::{error::Error, future::Future, pin::Pin};
 use tokio::net::TcpStream;
 
@@ -5,6 +6,7 @@ mod socks5;
 pub use socks5::Socks5Handler;
 
 // 代理协议枚举
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyProtocol {
     Socks5,
     // 如果添加了更多协议，可以在这里继续添加

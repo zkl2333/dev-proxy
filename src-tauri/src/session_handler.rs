@@ -3,7 +3,8 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
-use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
+use serde::Serialize;
+use tokio::{net::TcpStream, sync::Mutex};
 use tracing::info;
 
 use crate::protocol::{self, ProxyProtocol, Socks5Handler};
@@ -12,14 +13,15 @@ use crate::protocol::{self, ProxyProtocol, Socks5Handler};
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 // 自定义类型，用于延迟解析地址
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
 pub enum Address {
     SocketAddr(SocketAddr),
     DomainName(String, u16),
 }
 
 // 会话状态枚举
-#[derive(Debug)]
-enum SessionState {
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
     // 解析请求
     RequestParsing,
     // 连接到目标服务器
@@ -44,6 +46,14 @@ pub struct SessionHandler {
     protocol: ProxyProtocol,
     // 目标服务器地址
     target_addr: Option<Address>,
+}
+
+#[derive(Serialize)]
+pub struct SessionHandlerData {
+    pub id: u64,
+    pub state: SessionState,
+    pub protocol: ProxyProtocol,
+    pub target_addr: Option<Address>,
 }
 
 impl SessionHandler {
@@ -155,8 +165,8 @@ impl SessionHandler {
     }
 
     // 销毁会话
-    pub async fn destroy(mut self) {
-        // tracing::info!("销毁会话: {}", self.id);
+    pub async fn destroy(&self) {
+        tracing::info!("销毁会话: {}", self.id);
 
         // // 关闭客户端连接
         // let _ = self.client_connection.shutdown().await;
@@ -167,5 +177,14 @@ impl SessionHandler {
 
         // // 此处可以添加其他清理逻辑，比如更新状态或发送特定的断开消息
         // self.state = SessionState::Destroyed;
+    }
+
+    pub fn get_data(&self) -> SessionHandlerData {
+        SessionHandlerData {
+            id: self.id,
+            state: self.state,
+            protocol: self.protocol,
+            target_addr: self.target_addr.clone(),
+        }
     }
 }
