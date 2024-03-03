@@ -47,7 +47,9 @@ impl SessionManager {
                     // 克隆会话列表
                     let sessions_clone = self.sessions.clone();
                     // 尝试发送会话列表 如果失败则说明接收方已经被丢弃
-                    sender.send(sessions_clone);
+                    if sender.send(sessions_clone).is_err() {
+                        tracing::error!("发送会话列表时出错");
+                    }
                 }
             }
         }

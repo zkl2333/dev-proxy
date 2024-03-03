@@ -74,7 +74,7 @@ impl SessionHandler {
         tracing::info!("创建会话: {}", session.id);
         Ok(session)
     }
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self) -> &Self {
         loop {
             info!("会话{}的状态: {:?}", self.id, self.state);
             match self.state {
@@ -137,22 +137,14 @@ impl SessionHandler {
                     let mut client_connection = self.client_connection.lock().await;
                     let mut target_connection =
                         self.target_connection.as_ref().unwrap().lock().await;
-                    let (mut client_reader, mut client_writer) = client_connection.split();
-                    let (mut target_reader, mut target_writer) = target_connection.split();
-
-                    let client_to_target = tokio::io::copy(&mut client_reader, &mut target_writer);
-                    let target_to_client = tokio::io::copy(&mut target_reader, &mut client_writer);
-
-                    tokio::select! {
-                        result = client_to_target => {
-                            if let Err(e) = result {
-                                tracing::error!("从客户端到目标服务器的数据转发时出错: {}", e);
-                            }
-                        }
-                        result = target_to_client => {
-                            if let Err(e) = result {
-                                tracing::error!("从目标服务器到客户端的数据转发时出错: {}", e);
-                            }
+                    match tokio::io::copy_bidirectional(
+                        &mut *client_connection,
+                        &mut *target_connection,
+                    ).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("数据转发时出错: {}", e);
+                            break;
                         }
                     }
                     break;
@@ -162,10 +154,11 @@ impl SessionHandler {
                 }
             }
         }
+        self
     }
 
     // 销毁会话
-    pub async fn destroy(&self) {
+    pub async fn _destroy(&self) {
         tracing::info!("销毁会话: {}", self.id);
 
         // // 关闭客户端连接
