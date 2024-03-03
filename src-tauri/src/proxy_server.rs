@@ -1,17 +1,20 @@
+use crate::session_handler::{SessionHandler, SessionHandlerData};
+use crate::session_manager::{SessionManager, SessionManagerCommand};
 use std::sync::Arc;
-
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::{io, sync::Mutex};
-
-use crate::session_handler::SessionHandlerData;
-use crate::session_manager::SessionManagerCommand;
-use crate::{SessionHandler, SessionManager};
 
 // ProxyServer定义
 pub struct ProxyServer {
     stop_signal: Option<oneshot::Sender<()>>,
     session_manager_command_sender: mpsc::Sender<SessionManagerCommand>,
+}
+
+impl Default for ProxyServer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProxyServer {

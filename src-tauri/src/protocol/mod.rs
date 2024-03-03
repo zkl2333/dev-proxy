@@ -17,10 +17,8 @@ pub trait ProtocolHandler {
     where
         Self: Sized;
 
-    // 返回一个动态分派的 Future，而不是直接使用 async 方法
-    fn handle_request(
-        &mut self,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Box<dyn Error>>> + Send>>;
+    type HandleRequestFuture: Future<Output = Result<(), Box<dyn Error>>> + Send + 'static;
+    fn handle_request(&mut self) -> Pin<Box<Self::HandleRequestFuture>>;
 }
 
 // 识别协议的函数

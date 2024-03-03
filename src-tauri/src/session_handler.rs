@@ -4,7 +4,10 @@ use std::{
 };
 
 use serde::Serialize;
-use tokio::{net::TcpStream, sync::Mutex};
+use tokio::{
+    net::TcpStream,
+    sync::{oneshot, Mutex},
+};
 use tracing::info;
 
 use crate::protocol::{self, ProxyProtocol, Socks5Handler};
@@ -13,7 +16,7 @@ use crate::protocol::{self, ProxyProtocol, Socks5Handler};
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 // 自定义类型，用于延迟解析地址
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone)]
 pub enum Address {
     SocketAddr(SocketAddr),
     DomainName(String, u16),
@@ -28,8 +31,10 @@ pub enum SessionState {
     ConnectingToTarget,
     // 转发数据
     ForwardingData,
-    // 销毁
-    Destroyed,
+    // 取消
+    Canceled,
+    // 结束
+    Finished,
 }
 
 // 处理单个客户端会话的结构体
@@ -46,6 +51,9 @@ pub struct SessionHandler {
     protocol: ProxyProtocol,
     // 目标服务器地址
     target_addr: Option<Address>,
+    // 取消信号通道
+    cancel_sender: Option<oneshot::Sender<()>>,
+    cancel_receiver: Option<oneshot::Receiver<()>>,
 }
 
 #[derive(Serialize)]
@@ -53,7 +61,13 @@ pub struct SessionHandlerData {
     pub id: u64,
     pub state: SessionState,
     pub protocol: ProxyProtocol,
-    pub target_addr: Option<Address>,
+    pub target_addr: Option<String>,
+}
+
+impl Drop for SessionHandler {
+    fn drop(&mut self) {
+        info!("会话{}已销毁", self.id);
+    }
 }
 
 impl SessionHandler {
@@ -62,6 +76,7 @@ impl SessionHandler {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let protocol = protocol::identify_protocol(&client_connection).await?;
 
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
         let session = Self {
             id: NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             client_connection: Arc::new(Mutex::new(client_connection)),
@@ -69,11 +84,14 @@ impl SessionHandler {
             state: SessionState::RequestParsing,
             protocol,
             target_addr: None,
+            cancel_sender: Some(cancel_sender),
+            cancel_receiver: Some(cancel_receiver),
         };
 
         tracing::info!("创建会话: {}", session.id);
         Ok(session)
     }
+
     pub async fn run(&mut self) -> &Self {
         loop {
             info!("会话{}的状态: {:?}", self.id, self.state);
@@ -137,19 +155,37 @@ impl SessionHandler {
                     let mut client_connection = self.client_connection.lock().await;
                     let mut target_connection =
                         self.target_connection.as_ref().unwrap().lock().await;
-                    match tokio::io::copy_bidirectional(
-                        &mut *client_connection,
-                        &mut *target_connection,
-                    ).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::error!("数据转发时出错: {}", e);
-                            break;
+                    if let Some(receiver) = self.cancel_receiver.take() {
+                        tokio::select! {
+                            _ = receiver => {
+                                tracing::info!("会话{}已取消", self.id);
+                                self.state = SessionState::Canceled;
+                                break;
+                            }
+                            result = tokio::io::copy_bidirectional(
+                                &mut *client_connection,
+                                &mut *target_connection,
+                            ) => {
+                                match result {
+                                    Ok(_) => {
+                                        self.state = SessionState::Finished;
+
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("数据转发时出错: {}", e);
+                                        self.state = SessionState::Finished;
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+                SessionState::Canceled => {
+                    tracing::info!("会话{}已取消", self.id);
                     break;
                 }
-                SessionState::Destroyed => {
+                SessionState::Finished => {
+                    tracing::info!("会话{}已结束", self.id);
                     break;
                 }
             }
@@ -157,19 +193,11 @@ impl SessionHandler {
         self
     }
 
-    // 销毁会话
-    pub async fn _destroy(&self) {
-        tracing::info!("销毁会话: {}", self.id);
-
-        // // 关闭客户端连接
-        // let _ = self.client_connection.shutdown().await;
-        // // 如果存在目标连接，则关闭
-        // if let Some(mut target_conn) = self.target_connection.take() {
-        //     let _ = target_conn.shutdown().await;
-        // }
-
-        // // 此处可以添加其他清理逻辑，比如更新状态或发送特定的断开消息
-        // self.state = SessionState::Destroyed;
+    // 取消转发数据
+    pub fn cancel(&mut self) {
+        if let Some(sender) = self.cancel_sender.take() {
+            let _ = sender.send(());
+        }
     }
 
     pub fn get_data(&self) -> SessionHandlerData {
@@ -177,7 +205,13 @@ impl SessionHandler {
             id: self.id,
             state: self.state,
             protocol: self.protocol,
-            target_addr: self.target_addr.clone(),
+            target_addr: match &self.target_addr {
+                Some(addr) => match addr {
+                    Address::SocketAddr(addr) => Some(addr.to_string()),
+                    Address::DomainName(domain, port) => Some(format!("{}:{}", domain, port)),
+                },
+                None => None,
+            },
         }
     }
 }

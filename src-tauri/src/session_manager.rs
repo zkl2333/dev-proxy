@@ -1,8 +1,6 @@
+use crate::session_handler::SessionHandler;
 use std::sync::Arc;
-
 use tokio::sync::{mpsc, oneshot, Mutex};
-
-use crate::SessionHandler;
 
 pub enum SessionManagerCommand {
     Add(Arc<Mutex<SessionHandler>>),
@@ -63,6 +61,7 @@ impl SessionManager {
         // 判断是否存在
         for (i, s) in self.sessions.iter().enumerate() {
             if Arc::ptr_eq(s, &session) {
+                session.lock().await.cancel();
                 self.sessions.remove(i);
                 break;
             }
