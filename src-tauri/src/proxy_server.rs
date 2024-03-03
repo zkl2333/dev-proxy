@@ -49,13 +49,11 @@ impl ProxyServer {
                                     tracing::error!("发送会话管理命令时出错: {}", e);
                                 } else {
                                     tracing::info!("新会话已添加");
-                                    let session_manager_sender_clone_inside = session_manager_sender.clone();
                                     // 启动会话
                                     tokio::spawn(async move {
                                         let mut session_locked = session_arc.lock().await;
                                         let session = session_locked.run().await;
-                                        tracing::info!("会话{}已结束", session.id);
-                                        session_manager_sender_clone_inside.send(SessionManagerCommand::Remove(session_arc.clone())).await.unwrap();
+                                        tracing::info!("会话{}状态: {:?}", session.id, session.state);
                                     });
                                 }
                             }

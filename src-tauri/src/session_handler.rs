@@ -6,7 +6,7 @@ use std::{
 use serde::Serialize;
 use tokio::{
     net::TcpStream,
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
 };
 use tracing::info;
 
@@ -46,7 +46,7 @@ pub struct SessionHandler {
     // 目标服务器连接，可能在 SOCKS5 或 HTTP 请求处理过程中建立
     target_connection: Option<Arc<Mutex<TcpStream>>>,
     // 会话状态
-    state: SessionState,
+    pub state: SessionState,
     // 协议类型（SOCKS5或HTTP）
     protocol: ProxyProtocol,
     // 目标服务器地址
@@ -54,6 +54,8 @@ pub struct SessionHandler {
     // 取消信号通道
     cancel_sender: Option<oneshot::Sender<()>>,
     cancel_receiver: Option<oneshot::Receiver<()>>,
+    state_control_sender: mpsc::Sender<SessionState>,
+    state_control_receiver: mpsc::Receiver<SessionState>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +79,7 @@ impl SessionHandler {
         let protocol = protocol::identify_protocol(&client_connection).await?;
 
         let (cancel_sender, cancel_receiver) = oneshot::channel();
+        let (state_control_sender, state_control_receiver) = mpsc::channel(1);
         let session = Self {
             id: NEXT_SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             client_connection: Arc::new(Mutex::new(client_connection)),
@@ -86,14 +89,21 @@ impl SessionHandler {
             target_addr: None,
             cancel_sender: Some(cancel_sender),
             cancel_receiver: Some(cancel_receiver),
+            state_control_sender,
+            state_control_receiver,
         };
+
+        // 发送初始状态消息（例如，RequestParsing，表示开始解析请求）
+        let _ = session.state_control_sender.send(SessionState::RequestParsing).await;
 
         tracing::info!("创建会话: {}", session.id);
         Ok(session)
     }
 
     pub async fn run(&mut self) -> &Self {
-        loop {
+        info!("会话{}开始运行", self.id);
+        while let Some(state) = self.state_control_receiver.recv().await {
+            self.state = state;
             info!("会话{}的状态: {:?}", self.id, self.state);
             match self.state {
                 SessionState::RequestParsing => {
@@ -107,11 +117,15 @@ impl SessionHandler {
                             match addr {
                                 Ok(addr) => {
                                     self.target_addr = Some(addr);
-                                    self.state = SessionState::ConnectingToTarget;
+                                    // self.state = SessionState::ConnectingToTarget;
+                                    let _ = self
+                                        .state_control_sender
+                                        .send(SessionState::ConnectingToTarget)
+                                        .await;
                                 }
                                 Err(e) => {
                                     tracing::error!("解析SOCKS5请求时出错: {}", e);
-                                    break;
+                                    let _ = self.state_control_sender.send(SessionState::Finished).await;
                                 }
                             }
                         }
@@ -124,11 +138,15 @@ impl SessionHandler {
                             Ok(target_connection) => {
                                 self.target_connection =
                                     Some(Arc::new(Mutex::new(target_connection)));
-                                self.state = SessionState::ForwardingData;
+                                // self.state = SessionState::ForwardingData;
+                                let _ = self
+                                    .state_control_sender
+                                    .send(SessionState::ForwardingData)
+                                    .await;
                             }
                             Err(e) => {
                                 tracing::error!("连接到目标服务器时出错: {}", e);
-                                break;
+                                let _ = self.state_control_sender.send(SessionState::Finished).await;
                             }
                         }
                     }
@@ -138,46 +156,28 @@ impl SessionHandler {
                             Ok(target_connection) => {
                                 self.target_connection =
                                     Some(Arc::new(Mutex::new(target_connection)));
-                                self.state = SessionState::ForwardingData;
+                                let _ = self
+                                    .state_control_sender
+                                    .send(SessionState::ForwardingData)
+                                    .await;
                             }
                             Err(e) => {
                                 tracing::error!("连接到目标服务器时出错: {}", e);
-                                break;
+                                let _ = self.state_control_sender.send(SessionState::Finished).await;
                             }
                         }
                     }
                     None => {
-                        tracing::error!("目标地址为空");
-                        break;
+                        // tracing::error!("目标地址为空");
+                        let _ = self.state_control_sender.send(SessionState::Finished).await;
                     }
                 },
                 SessionState::ForwardingData => {
-                    let mut client_connection = self.client_connection.lock().await;
-                    let mut target_connection =
-                        self.target_connection.as_ref().unwrap().lock().await;
-                    if let Some(receiver) = self.cancel_receiver.take() {
-                        tokio::select! {
-                            _ = receiver => {
-                                tracing::info!("会话{}已取消", self.id);
-                                self.state = SessionState::Canceled;
-                                break;
-                            }
-                            result = tokio::io::copy_bidirectional(
-                                &mut *client_connection,
-                                &mut *target_connection,
-                            ) => {
-                                match result {
-                                    Ok(_) => {
-                                        self.state = SessionState::Finished;
-
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("数据转发时出错: {}", e);
-                                        self.state = SessionState::Finished;
-                                    }
-                                }
-                            }
-                        }
+                    if let Some(cancel_receiver) = self.cancel_receiver.take() {
+                        self.forward_data(cancel_receiver).await;
+                    }else {
+                        tracing::error!("取消信号通道丢失");
+                        let _ = self.state_control_sender.send(SessionState::Finished).await;
                     }
                 }
                 SessionState::Canceled => {
@@ -193,10 +193,44 @@ impl SessionHandler {
         self
     }
 
+    async fn forward_data(&self, cancel_receiver: oneshot::Receiver<()>) {
+        let client_connection = self.client_connection.clone();
+        let target_connection = self.target_connection.clone().unwrap(); // 假设已经设置
+        let state_sender = self.state_control_sender.clone();
+
+        tokio::spawn(async move {
+            let mut client_connection = client_connection.lock().await;
+            let mut target_connection = target_connection.lock().await;
+
+            tokio::select! {
+                result = tokio::io::copy_bidirectional(&mut *client_connection, &mut *target_connection) => {
+                    match result {
+                        Ok(_) => {
+                            // 数据转发成功，发送Finished状态
+                            let _ = state_sender.send(SessionState::Finished).await;
+                        }
+                        Err(_) => {
+                            // 数据转发失败，同样视为结束
+                            let _ = state_sender.send(SessionState::Finished).await;
+                        }
+                    }
+                },
+                _ = cancel_receiver => {
+                    // 收到取消信号，提前结束
+                    println!("数据转发被取消");
+                    let _ = state_sender.send(SessionState::Canceled).await;
+                }
+            }
+        });
+
+        info!("会话{}开始转发数据", self.id);
+    }
+
     // 取消转发数据
     pub fn cancel(&mut self) {
-        if let Some(sender) = self.cancel_sender.take() {
-            let _ = sender.send(());
+        info!("会话{}取消", self.id);
+        if let Some(cancel_sender) = self.cancel_sender.take() {
+            let _ = cancel_sender.send(());
         }
     }
 

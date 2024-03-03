@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub enum SessionManagerCommand {
     Add(Arc<Mutex<SessionHandler>>),
-    Remove(Arc<Mutex<SessionHandler>>),
+    // Remove(Arc<Mutex<SessionHandler>>),
     GetSessions(oneshot::Sender<Vec<Arc<Mutex<SessionHandler>>>>),
 }
 
@@ -38,9 +38,9 @@ impl SessionManager {
                 SessionManagerCommand::Add(session) => {
                     self.add_session(session);
                 }
-                SessionManagerCommand::Remove(session) => {
-                    self.remove_session(session).await;
-                }
+                // SessionManagerCommand::Remove(session) => {
+                //     self.remove_session(session).await;
+                // }
                 SessionManagerCommand::GetSessions(sender) => {
                     // 克隆会话列表
                     let sessions_clone = self.sessions.clone();
@@ -57,14 +57,14 @@ impl SessionManager {
         self.sessions.push(session);
     }
 
-    pub async fn remove_session(&mut self, session: Arc<Mutex<SessionHandler>>) {
-        // 判断是否存在
-        for (i, s) in self.sessions.iter().enumerate() {
-            if Arc::ptr_eq(s, &session) {
-                session.lock().await.cancel();
-                self.sessions.remove(i);
-                break;
-            }
-        }
-    }
+    // pub async fn remove_session(&mut self, session: Arc<Mutex<SessionHandler>>) {
+    //     // 判断是否存在
+    //     for (i, s) in self.sessions.iter().enumerate() {
+    //         if Arc::ptr_eq(s, &session) {
+    //             session.lock().await.cancel();
+    //             self.sessions.remove(i);
+    //             break;
+    //         }
+    //     }
+    // }
 }
