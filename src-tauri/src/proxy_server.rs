@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::io;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
+use tracing::instrument;
 
 // ProxyServer定义
 pub struct ProxyServer {
@@ -27,6 +28,7 @@ impl ProxyServer {
     }
 
     // 启动代理服务器的逻辑
+    #[instrument(skip(self))]
     pub async fn start(&mut self) -> io::Result<()> {
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let listener = TcpListener::bind("127.0.0.1:1080").await?;
@@ -35,25 +37,13 @@ impl ProxyServer {
         // 获取`session_manager_command_sender`的克隆以在异步任务中使用
         let session_manager_sender = self.session_manager_command_sender.clone();
 
+        // 启动一个异步任务来监听取消信号
         tokio::spawn(async move {
             tokio::select! {
                 _ = async {
-                    while let Ok((stream, _)) = listener.accept().await {
-                        // 在这里处理新连接
-                        let session = SessionHandler::new(stream).await;
-                        match session {
-                            Ok(session) => {
-                                let session = Arc::new(session);
-                                // 使用克隆的sender发送添加会话的命令
-                                if let Err(e) = session_manager_sender.send(SessionManagerCommand::Add(session.clone())).await {
-                                    tracing::error!("发送会话管理命令时出错: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("处理新连接时出错: {}", e);
-                            }
-                        }
-                           }
+                    while let Ok((stream, addr)) = listener.accept().await {
+                        handler_new_connection(stream,addr, session_manager_sender.clone()).await;
+                    }
                 } => {},
                 _ = stop_rx => {
                     // 停止监听新的连接
@@ -101,5 +91,30 @@ impl ProxyServer {
             session_data_list.push(session.get_data().await);
         }
         session_data_list
+    }
+}
+
+#[instrument(skip(stream, session_manager_command_sender))]
+async fn handler_new_connection(
+    stream: tokio::net::TcpStream,
+    addr: std::net::SocketAddr,
+    session_manager_command_sender: mpsc::Sender<SessionManagerCommand>,
+) {
+    let session = SessionHandler::new(stream).await;
+    let session_manager_sender = session_manager_command_sender;
+    match session {
+        Ok(session) => {
+            let session = Arc::new(session);
+            // 使用克隆的sender发送添加会话的命令
+            if let Err(e) = session_manager_sender
+                .send(SessionManagerCommand::Add(session.clone()))
+                .await
+            {
+                tracing::error!("发送会话管理命令时出错: {}", e);
+            }
+        }
+        Err(e) => {
+            tracing::error!("处理新连接时出错: {}", e);
+        }
     }
 }

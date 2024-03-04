@@ -8,7 +8,7 @@ use tokio::{
     net::TcpStream,
     sync::{oneshot, Mutex},
 };
-use tracing::info;
+use tracing::{info, instrument};
 
 use crate::protocol::{self, ProxyProtocol, Socks5Handler};
 
@@ -71,6 +71,7 @@ impl Drop for SessionHandler {
 }
 
 impl SessionHandler {
+    #[instrument(skip(client_connection))]
     pub async fn new(
         client_connection: TcpStream,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -92,9 +93,11 @@ impl SessionHandler {
         Ok(session)
     }
 
+    #[instrument(skip(self))]
     pub async fn run(&self) -> &Self {
         loop {
             let state = self.state.lock().await;
+            info!("会话{}状态: {:?}", self.id, *state);
             match *state {
                 SessionState::RequestParsing => {
                     drop(state);
@@ -213,6 +216,7 @@ impl SessionHandler {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn get_data(&self) -> SessionHandlerData {
         let state = self.state.lock().await;
         SessionHandlerData {
