@@ -1,9 +1,9 @@
 use crate::session_handler::{SessionHandler, SessionHandlerData};
 use crate::session_manager::{SessionManager, SessionManagerCommand};
 use std::sync::Arc;
+use tokio::io;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
-use tokio::{io, sync::Mutex};
 
 // ProxyServer定义
 pub struct ProxyServer {
@@ -43,18 +43,10 @@ impl ProxyServer {
                         let session = SessionHandler::new(stream).await;
                         match session {
                             Ok(session) => {
-                                let session_arc = Arc::new(Mutex::new(session));
+                                let session = Arc::new(session);
                                 // 使用克隆的sender发送添加会话的命令
-                                if let Err(e) = session_manager_sender.send(SessionManagerCommand::Add(session_arc.clone())).await {
+                                if let Err(e) = session_manager_sender.send(SessionManagerCommand::Add(session.clone())).await {
                                     tracing::error!("发送会话管理命令时出错: {}", e);
-                                } else {
-                                    tracing::info!("新会话已添加");
-                                    // 启动会话
-                                    tokio::spawn(async move {
-                                        let mut session_locked = session_arc.lock().await;
-                                        let session = session_locked.run().await;
-                                        tracing::info!("会话{}状态: {:?}", session.id, session.state);
-                                    });
                                 }
                             }
                             Err(e) => {
@@ -87,7 +79,7 @@ impl ProxyServer {
         self.stop_signal.is_some()
     }
 
-    pub async fn get_sessions(&self) -> Vec<Arc<Mutex<SessionHandler>>> {
+    pub async fn get_sessions(&self) -> Vec<Arc<SessionHandler>> {
         let (tx, rx) = oneshot::channel();
         if self
             .session_manager_command_sender
@@ -106,8 +98,7 @@ impl ProxyServer {
         let sessions = self.get_sessions().await;
         let mut session_data_list = Vec::new();
         for session in sessions {
-            let session = session.lock().await;
-            session_data_list.push(session.get_data());
+            session_data_list.push(session.get_data().await);
         }
         session_data_list
     }

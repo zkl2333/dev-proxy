@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
 import { ScrollArea } from "@/components/ui/scroll-area";
 
@@ -8,6 +8,24 @@ interface Session {
   protocol: string;
   target_addr: any;
 }
+
+const uesInterval = (callback: () => void, delay: number) => {
+  const savedCallback = useRef<() => void>();
+
+  useEffect(() => {
+    savedCallback.current = callback;
+  }, [callback]);
+
+  useEffect(() => {
+    const tick = () => {
+      savedCallback.current!();
+    };
+    if (delay !== null) {
+      const id = setInterval(tick, delay);
+      return () => clearInterval(id);
+    }
+  }, [delay]);
+};
 
 const Connections = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -25,6 +43,10 @@ const Connections = () => {
   useEffect(() => {
     get_proxy_connections();
   }, []);
+
+  uesInterval(() => {
+    get_proxy_connections();
+  }, 500);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

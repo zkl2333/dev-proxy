@@ -2,14 +2,15 @@ use crate::session_handler::SessionHandler;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+type Session = Arc<SessionHandler>;
+
 pub enum SessionManagerCommand {
-    Add(Arc<Mutex<SessionHandler>>),
-    // Remove(Arc<Mutex<SessionHandler>>),
-    GetSessions(oneshot::Sender<Vec<Arc<Mutex<SessionHandler>>>>),
+    Add(Session),
+    GetSessions(oneshot::Sender<Vec<Session>>),
 }
 
 pub struct SessionManager {
-    pub sessions: Vec<Arc<Mutex<SessionHandler>>>,
+    pub sessions: Vec<Session>,
 }
 
 impl SessionManager {
@@ -22,7 +23,6 @@ impl SessionManager {
 
         let manager_clone = manager.clone();
         tokio::spawn(async move {
-            // 由于 manager_clone 是 Arc<Mutex<Self>>，我们需要先获取锁
             let mut manager = manager_clone.lock().await;
             manager.run(receiver).await;
         });
@@ -36,11 +36,13 @@ impl SessionManager {
         while let Some(command) = receiver.recv().await {
             match command {
                 SessionManagerCommand::Add(session) => {
-                    self.add_session(session);
+                    self.add_session(session.clone());
+                    tokio::spawn(async move {
+                        let session_locked = session;
+                        let session = session_locked.run().await;
+                        tracing::info!("会话 run 结束 {}状态: {:?}", session.id, session.state);
+                    });
                 }
-                // SessionManagerCommand::Remove(session) => {
-                //     self.remove_session(session).await;
-                // }
                 SessionManagerCommand::GetSessions(sender) => {
                     // 克隆会话列表
                     let sessions_clone = self.sessions.clone();
@@ -53,18 +55,11 @@ impl SessionManager {
         }
     }
 
-    pub fn add_session(&mut self, session: Arc<Mutex<SessionHandler>>) {
+    pub fn add_session(&mut self, session: Session) {
         self.sessions.push(session);
     }
 
-    // pub async fn remove_session(&mut self, session: Arc<Mutex<SessionHandler>>) {
-    //     // 判断是否存在
-    //     for (i, s) in self.sessions.iter().enumerate() {
-    //         if Arc::ptr_eq(s, &session) {
-    //             session.lock().await.cancel();
-    //             self.sessions.remove(i);
-    //             break;
-    //         }
-    //     }
-    // }
+    pub fn cancel_session() {
+        todo!("取消会话")
+    }
 }
